@@ -1,20 +1,15 @@
-pdfplumber
-pytesseract
-pdf2image
-sentence-transformers
-qdrant-client
-langchain
-openai
-torch
-Pillow
-python-dotenv
-
 fastapi
 uvicorn
-# python-dotenv
-# sentence-transformers
-# qdrant-client
-openai
-langchain-text-splitters
-# pdfplumber
 pydantic
+python-dotenv
+
+sentence-transformers
+torch
+
+qdrant-client
+
+openai
+
+langchain-text-splitters
+
+pdfplumber
