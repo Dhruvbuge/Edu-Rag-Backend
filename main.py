@@ -1,21 +1,18 @@
 # main.py
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Optional
 
-from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 from qdrant_client import QdrantClient
-from utils.qdrant_utils import search_qdrant
+from fastapi.middleware.cors import CORSMiddleware
 
 from utils.rag_utils import generate_answer
 
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-
 # --------------------------------------------------
-# Load ENV variables (Render injects them automatically)
+# Load ENV variables
 # --------------------------------------------------
 load_dotenv()
 
@@ -28,17 +25,17 @@ if not OPENAI_API_KEY or not QDRANT_URL or not QDRANT_API_KEY:
     raise RuntimeError("Missing required environment variables")
 
 # --------------------------------------------------
-# Initialize clients ONCE (important for performance)
+# Initialize clients (LIGHTWEIGHT)
 # --------------------------------------------------
 client = OpenAI(api_key=OPENAI_API_KEY)
-embedder = embedder = SentenceTransformer("BAAI/bge-large-en")
-
 
 qdrant_client = QdrantClient(
     url=QDRANT_URL,
     api_key=QDRANT_API_KEY,
     timeout=60.0,
 )
+
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 # --------------------------------------------------
 # FastAPI app
@@ -53,7 +50,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # --------------------------------------------------
 # Request schema
 # --------------------------------------------------
@@ -63,25 +59,18 @@ class QueryRequest(BaseModel):
     image_base64: Optional[str] = None
 
 # --------------------------------------------------
-# RAG Query Logic
+# Embedding helper (OpenAI)
 # --------------------------------------------------
-def query_rag(query: str, top_k: int):
-    q_emb = embedder.encode([query], convert_to_numpy=True)[0].tolist()
-
-    result = qdrant_client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=q_emb,
-        limit=top_k,
-        with_payload=True,
+def embed_text(text: str) -> list[float]:
+    response = client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=text,
     )
+    return response.data[0].embedding
 
-    hits = result.points
-    if not hits:
-        return "I couldn't find anything relevant in the stored documents."
-
-    context = "\n---\n".join([p.payload["text"] for p in hits])
-    return generate_answer(client, context, query)
-
+# --------------------------------------------------
+# Multimodal Answer
+# --------------------------------------------------
 def generate_multimodal_answer(question: str, context: str, image_base64: str):
     response = client.responses.create(
         model="gpt-4.1-mini",
@@ -104,19 +93,16 @@ Question:
 """
                     },
                     {
-    "type": "input_image",
-    "image_url": f"data:image/png;base64,{image_base64}"
-}
-
-                ]
+                        "type": "input_image",
+                        "image_url": f"data:image/png;base64,{image_base64}",
+                    },
+                ],
             }
         ],
-        max_output_tokens=500
+        max_output_tokens=500,
     )
 
     return response.output_text
-
-
 
 # --------------------------------------------------
 # API Endpoint
@@ -124,25 +110,28 @@ Question:
 @app.post("/query")
 def ask_question(req: QueryRequest):
     try:
-        # Step 1: Retrieve context (RAG)
         context = ""
+
         if req.question.strip():
-            q_emb = embedder.encode([req.question], convert_to_numpy=True)[0].tolist()
+            q_emb = embed_text(req.question)
+
             result = qdrant_client.query_points(
                 collection_name=COLLECTION_NAME,
                 query=q_emb,
                 limit=req.top_k,
                 with_payload=True,
             )
-            hits = result.points
-            context = "\n---\n".join([p.payload["text"] for p in hits]) if hits else ""
 
-        # Step 2: Decide text-only vs multimodal
+            hits = result.points
+            context = "\n---\n".join(
+                [p.payload["text"] for p in hits]
+            ) if hits else ""
+
         if req.image_base64:
             answer = generate_multimodal_answer(
                 req.question,
                 context,
-                req.image_base64
+                req.image_base64,
             )
         else:
             answer = generate_answer(client, context, req.question)
@@ -152,8 +141,6 @@ def ask_question(req: QueryRequest):
     except Exception as e:
         print("🔥 BACKEND ERROR:", e)
         raise
-
-
 
 # --------------------------------------------------
 # Health Check (Render requirement)
